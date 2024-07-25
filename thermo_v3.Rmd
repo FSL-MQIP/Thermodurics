@@ -1,0 +1,199 @@
+---
+title: "Thermodurics"
+author: "Caroline Motzer"
+date: "2024-04-19"
+output: pdf_document
+---
+##loading packages, setting WD/loading in data and cleaning data
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(knitr)
+library(tidyverse)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(lme4)
+library(lmerTest)
+library(emmeans)
+library(pbkrtest)
+thermo <- read.csv("thermoduricdata_R.csv")
+thermo$Strain<- as.factor(thermo$Strain)
+thermo$Genera<- as.factor(thermo$Genera)
+thermo$HeatTrt<- as.factor(thermo$HeatTrt)
+thermo$IncubationTime<- as.factor(thermo$IncubationTime)
+thermo$MediaType[thermo$MediaType=="SPC"]<- "SMA"
+thermo$Genera[thermo$Genera=="corynebacterium"]<- "Corynebacterium"
+thermo$MediaType<- as.factor(thermo$MediaType)
+thermo$Comeup.Time.seconds<-period_to_seconds(ms(paste("0",thermo$Comeup.Time,sep="")))
+```
+##changing reference for model to microbacterium, SMA, and 48h. Also, double checking reference level is reset
+```{r}
+thermo<-droplevels(thermo)
+thermo$MediaType<-relevel(thermo$MediaType,ref= "SMA")
+
+thermo$Genera<-relevel(thermo$Genera, ref = "Microbacterium")
+
+thermo$IncubationTime<-relevel(thermo$IncubationTime, ref = "48")
+
+```
+##creating log reduction column, creating "beaker" (AKA plate) column i.e linking results that came from the same plate
+```{r}
+thermo$log.reduction<- log10(thermo$Startingconc+1)-log10(thermo$Countcfu+1)
+thermo$Beaker<- paste(thermo$Strain, thermo$HeatTrt, sep = "-")
+```
+##ceating model 1 AKA methodmodel and running ANOVA and checking model assumptions
+```{r}
+methodmodel<-lmer(log.reduction~Genera*HeatTrt*IncubationTime*MediaType+(1|Strain)+(1|Beaker), data=thermo)
+summary(methodmodel)
+anova(methodmodel)
+hist(residuals(methodmodel))
+plot(predict(methodmodel), residuals(methodmodel))
+```
+##creating figure 2
+```{r}
+thermo_filtered <- subset(thermo, IncubationTime == "48" & MediaType == "SMA")
+
+figure2<- ggplot(thermo_filtered, aes(x = Genera, y = log.reduction)) + 
+  geom_boxplot(outlier.shape = NA) +  # Remove outliers
+  geom_jitter(aes(color = HeatTrt), position = position_jitter(width = 0.2), size = 2) +
+  labs(y = "Reduction in Cell Count (log CFU/mL)", x = "Genera") +
+  theme(axis.text.x = element_text(face = 'italic'))
+figure_box2
+ggsave("figure2.png", plot = figure2, width = 10, height = 6, dpi = 300)
+
+```
+
+##identifying what interactions are driving the significance in Model 1 AKA methodmodel
+```{r}
+pairs(emmeans(methodmodel,~IncubationTime))
+pairs(emmeans(methodmodel,~IncubationTime|Genera, CIs=TRUE))
+pairs(emmeans(methodmodel, ~MediaType))
+pairs(emmeans(methodmodel,~MediaType|Genera, CIs=TRUE))
+```
+##Generating emip, CM I think we can delete this
+
+```{r}
+emmip(methodmodel, MediaType~IncubationTime|Genera, CIs=TRUE)
+```
+##creating the dataset to be used for Model 2:
+##removing genera that had minimal growth (i.e., Corynebacterium, Macrococcus, Stpahylococcus) and removing 24h time point
+```{r}
+n=thermo%>% filter( ! (Genera%in% c("Macrococcus", "Corynebacterium", "Staphylococcus") | (IncubationTime == "24")))
+n %>% view()
+```
+
+
+##Creating model 2 getting ANOVA and identifying which interactions are driving significance via pair wise comparisons of estimated means 
+```{r}
+model2<- lmer(log.reduction~Genera*HeatTrt*IncubationTime*MediaType+(1|Strain)+(1|Beaker), data=n)
+anova(model2)
+pairs(emmeans(model2, ~HeatTrt))
+pairs(emmeans(model2, ~IncubationTime))
+pairs(emmeans(model2, ~MediaType))
+pairs(emmeans(model2, ~MediaType|Genera))
+emmip(model2, MediaType~IncubationTime|Genera, CIs=TRUE)
+```
+##creating figure 4 to show differences in media and incubation time for model 2
+```{r}
+italic_labeller <- as_labeller(function(label) {
+  paste0("italic('", label, "')")
+}, default = label_parsed)
+
+
+figure4 = emmip(model2, MediaType ~ IncubationTime | Genera, CIs = TRUE,
+      ylab = "Reduction in Cell Count (log CFU/ml)",
+      xlab = "Incubation Time (h)") +
+  facet_wrap(
+  ~ Genera, 
+  labeller = italic_labeller)
+figure4
+ggsave("figure4.png", plot = figure4, dpi = 300)
+```
+
+##creating ANOVA for model 2 table to put into Word
+```{r}
+# Install and load necessary packages
+install.packages("officer")
+install.packages("flextable")
+library(officer)
+library(flextable)
+
+# Example ANOVA
+
+anova_table <- summary(model2)
+
+# Convert the ANOVA table to a data frame
+anova_mod2 <- as.data.frame(anova(model2))
+
+anova_mod2<- anova_mod2 %>% mutate_if(is.numeric, ~ round(., 2))
+
+# Create a flextable from the data frame
+anova_flextable <- flextable(anova_mod2)
+
+
+# Create a Word document
+doc <- read_docx()
+
+# Add the flextable to the document
+doc <- body_add_flextable(doc, value = anova_flextable)
+
+# Save the document
+print(doc, target = "ANOVA_table1.docx")
+```
+##Creating Figure 5
+```{r}
+custom_labels <- c("A","B","C", "D")
+figure5<- emmip(model2, ~HeatTrt, 
+      CIs=TRUE,
+      ylab = "Reduction in Cell Count (log CFU/mL)",
+      xlab = expression("Heat Treatment")) +
+  scale_x_discrete(labels = custom_labels)
+ggsave("figure5.png", plot = figure5, dpi = 300)
+
+```
+
+##to make supplemental figure 1
+```{r}
+supplementalFigure<- ggplot(thermo,aes(x=Genera, y=log.reduction, col=Genera, shape=IncubationTime)) + 
+  geom_point() + 
+   ylab("Reduction in Cell Count (log CFU/mL)") +
+  facet_wrap(~paste(HeatTrt,MediaType,IncubationTime)) +
+   theme(axis.text.x = element_blank()) +
+  guides(color = guide_legend(title.theme = element_text(face = "plain"), 
+                              label.theme = element_text(face = "italic")))
+supplementalFigure
+ggsave("supplementalFigure.png", height = 6, width = 8, units = "in", dpi = "retina")
+
+```
+##to generate figures that relevel the 24 and 48h so 24 comes first use this model  
+```{r}
+z=thermo
+z$IncubationTime<-relevel(z$IncubationTime, ref = "24")
+z$MediaType<- relevel(z$MediaType, ref = "SMA")
+z$IncubationTime
+z$MediaType
+zzomethodmodel<- lmer(log.reduction~Genera*HeatTrt*IncubationTime*MediaType+(1|Strain)+(1|Beaker), data=z)
+anova(zzomethodmodel)
+emmeans(zzomethodmodel,~IncubationTime|Genera + MediaType)
+```
+##Figure 3
+```{r}
+italic_labeller <- as_labeller(function(label) {
+  paste0("italic('", label, "')")
+}, default = label_parsed)
+
+figure3<-emmip(zzomethodmodel, MediaType ~ IncubationTime | Genera, CIs = TRUE,
+      ylab = "Reduction in Cell Count (log CFU/ml)",
+      xlab = "Incubation Time (h)") +
+  facet_wrap(
+  ~ Genera, 
+  labeller = italic_labeller
+  )
+figure3
+  ggsave("figure3.png", plot = figure3, dpi = 300)
+```
+##to create data frame that only shows 48h counts
+```{r}
+thermoresults<- subset(thermo, IncubationTime == "48")
+```
+
